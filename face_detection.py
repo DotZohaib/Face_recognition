@@ -1,27 +1,33 @@
-# this is real code on introduction
-# Import dependencies
-from IPython.display import display, Javascript, Image
-from google.colab.output import eval_js
-from base64 import b64decode, b64encode
+import streamlit as st
 import cv2
 import numpy as np
-import PIL
+import PIL.Image
+from PIL import Image
 import io
 import time
 import os
-import json
-import math  # For animation calculations
+import math
+import requests
+from io import BytesIO
+import base64
+
+# Set page config
+st.set_page_config(
+    page_title="Face Recognition System",
+    page_icon="🔍",
+    layout="wide"
+)
 
 # Configuration flags
-USE_DNN_DETECTOR = True      # Toggle between Haar Cascade and DNN detector
-ENABLE_EMOTION_DETECTION = True # Enable emotion detection
-ENABLE_FRIEND_INFO = True    # New flag to enable friend information display
-ENABLE_ANIMATIONS = True     # New flag to enable animation effects
+USE_DNN_DETECTOR = True       # Toggle between Haar Cascade and DNN detector
+ENABLE_EMOTION_DETECTION = True  # Enable emotion detection
+ENABLE_FRIEND_INFO = True     # Enable friend information display
+ENABLE_ANIMATIONS = True      # Enable animation effects
 
 # Animation settings
-PULSE_SPEED = 2.0            # Speed of pulsing animations
-SLIDE_SPEED = 15             # Speed of sliding animations (pixels per frame)
-FADE_SPEED = 0.1             # Speed of fade-in animations (alpha per frame)
+PULSE_SPEED = 2.0             # Speed of pulsing animations
+SLIDE_SPEED = 15              # Speed of sliding animations (pixels per frame)
+FADE_SPEED = 0.1              # Speed of fade-in animations (alpha per frame)
 
 # Load emotion labels
 emotion_labels = ['neutral', 'happy', 'surprise', 'sad', 'anger', 'disgust', 'fear', 'contempt']
@@ -36,49 +42,79 @@ friend_profiles = {
         "since": "2018",
         "interests": "Hacking, Coding",
         "relationship_score": 95,
-        "image": "/content/alice_profile.jpg"
+        "image": "alice_profile.jpg"  # This will be a placeholder
     }
+}
+
+# Add more friends for demo purposes
+friend_profiles["friend2"] = {
+    "name": "John Smith",
+    "age": 25,
+    "category": "Work Colleague",
+    "id": "FR-2025-002",
+    "since": "2023",
+    "interests": "AI, Data Science",
+    "relationship_score": 80,
+    "image": "john_profile.jpg"
 }
 
 # Select a default friend to display info for
 default_friend_name = "friend1"
 
-# Download and load DNN models if needed
-if USE_DNN_DETECTOR or ENABLE_EMOTION_DETECTION:
-    # Download necessary model files
-    !wget -q https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt
-    !wget -q https://github.com/opencv/opencv_3rdparty/raw/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel -O res10_300x300_ssd_iter_140000.caffemodel
-    !wget -q https://github.com/onnx/models/raw/main/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx
+# Download function for models
+@st.cache_resource
+def download_models():
+    models_dir = "models"
+    os.makedirs(models_dir, exist_ok=True)
+    
+    files_to_download = {
+        "deploy.prototxt": "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
+        "res10_300x300_ssd_iter_140000.caffemodel": "https://github.com/opencv/opencv_3rdparty/raw/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel",
+        "emotion-ferplus-8.onnx": "https://github.com/onnx/models/raw/main/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
+    }
+    
+    for filename, url in files_to_download.items():
+        filepath = os.path.join(models_dir, filename)
+        if not os.path.exists(filepath):
+            with st.spinner(f"Downloading {filename}..."):
+                response = requests.get(url)
+                with open(filepath, "wb") as f:
+                    f.write(response.content)
+                st.success(f"Downloaded {filename}")
+    
+    return models_dir
 
 # Initialize face detector
-if USE_DNN_DETECTOR:
-    face_detector_net = cv2.dnn.readNetFromCaffe('deploy.prototxt',
-                                            'res10_300x300_ssd_iter_140000.caffemodel')
-else:
-    face_cascade = cv2.CascadeClassifier(cv2.samples.findFile(cv2.data.haarcascades +
-                                                                 'haarcascade_frontalface_default.xml'))
+@st.cache_resource
+def initialize_face_detector(models_dir):
+    if USE_DNN_DETECTOR:
+        face_detector_net = cv2.dnn.readNetFromCaffe(
+            f"{models_dir}/deploy.prototxt",
+            f"{models_dir}/res10_300x300_ssd_iter_140000.caffemodel"
+        )
+    else:
+        face_detector_net = None
+        
+    return face_detector_net
 
 # Initialize emotion detector
-if ENABLE_EMOTION_DETECTION:
-    if os.path.exists('emotion-ferplus-8.onnx'):
-        emotion_net = cv2.dnn.readNetFromONNX('emotion-ferplus-8.onnx')
-    else:
-        print("Error: emotion-ferplus-8.onnx file not found. Please download it.")
+@st.cache_resource
+def initialize_emotion_detector(models_dir):
+    if ENABLE_EMOTION_DETECTION:
+        emotion_path = f"{models_dir}/emotion-ferplus-8.onnx"
+        if os.path.exists(emotion_path):
+            emotion_net = cv2.dnn.readNetFromONNX(emotion_path)
+            return emotion_net
+    return None
 
-# Helper function: Convert JS data URL to an OpenCV image
-def js_to_image(js_reply):
-    image_bytes = b64decode(js_reply.split(',')[1])
-    jpg_as_np = np.frombuffer(image_bytes, dtype=np.uint8)
-    return cv2.imdecode(jpg_as_np, flags=1)
+# Convert a NumPy image (RGBA) to a base64 PNG for overlay
+def rgba_to_base64(rgba_array):
+    img = PIL.Image.fromarray(rgba_array, 'RGBA')
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-# Helper function: Convert a NumPy image (RGBA) to a base64 PNG for overlay
-def bbox_to_bytes(bbox_array):
-    bbox_PIL = PIL.Image.fromarray(bbox_array, 'RGBA')
-    iobuf = io.BytesIO()
-    bbox_PIL.save(iobuf, format='png')
-    return 'data:image/png;base64,{}'.format(str(b64encode(iobuf.getvalue()), 'utf-8'))
-
-# Helper function: Draw stylized ID card for friend information
+# Draw stylized ID card for friend information
 def draw_id_card(overlay, x, y, w, h, friend_info, frame_count):
     # Card dimensions and position (below the face)
     card_width = max(300, w * 1.5)
@@ -206,207 +242,15 @@ def draw_animated_face_box(overlay, x, y, w, h, emotion, frame_count):
         # Simple rectangle if animations disabled
         cv2.rectangle(overlay, (x, y), (x + w, y + h), (255, 0, 0, 255), 2)
 
-# JavaScript video stream setup
-def video_stream():
-    js = Javascript('''
-    var video;
-    var div = null;
-    var stream;
-    var captureCanvas;
-    var imgElement;
-    var labelElement;
-
-    var pendingResolve = null;
-    var shutdown = false;
-
-    function removeDom() {
-        stream.getVideoTracks()[0].stop();
-        video.remove();
-        div.remove();
-        video = null;
-        div = null;
-        stream = null;
-        imgElement = null;
-        captureCanvas = null;
-        labelElement = null;
-    }
-
-    function onAnimationFrame() {
-      if (!shutdown) {
-        window.requestAnimationFrame(onAnimationFrame);
-      }
-      if (pendingResolve) {
-        var result = "";
-        if (!shutdown) {
-          captureCanvas.getContext('2d').drawImage(video, 0, 0, 640, 480);
-          result = captureCanvas.toDataURL('image/jpeg', 0.8)
-        }
-        var lp = pendingResolve;
-        pendingResolve = null;
-        lp(result);
-      }
-    }
-
-   async function createDom() {
-      if (div !== null) {
-        return stream;
-      }
-
-      div = document.createElement('div');
-      div.style.border = '2px solid black';
-      div.style.padding = '3px';
-      div.style.width = '100%';
-      div.style.maxWidth = '600px';
-      div.style.background = '#333';
-      div.style.borderRadius = '8px';
-      div.style.boxShadow = '0 4px 8px rgba(0,0,0,0.5)';
-      document.body.appendChild(div);
-
-      const modelOut = document.createElement('div');
-      modelOut.style.background = '#222';
-      modelOut.style.color = '#fff';
-      modelOut.style.padding = '8px';
-      modelOut.style.borderRadius = '4px 4px 0 0';
-      modelOut.style.display = 'flex';
-      modelOut.style.justifyContent = 'space-between';
-      modelOut.innerHTML = "<span style='font-weight:300'>AI Detection Status:</span>";
-      labelElement = document.createElement('span');
-      labelElement.innerText = 'Initializing...';
-      labelElement.style.fontWeight = 'bold';
-      labelElement.style.color = '#4CAF50';
-      modelOut.appendChild(labelElement);
-      div.appendChild(modelOut);
-
-      video = document.createElement('video');
-      video.style.display = 'block';
-      video.style.width = '100%';
-      video.style.borderRadius = '0';
-      video.style.transform = 'scaleX(-1)'; // Keep mirror effect for video
-      video.setAttribute('playsinline', '');
-      video.onclick = () => { shutdown = true; };
-      stream = await navigator.mediaDevices.getUserMedia(
-          {video: { facingMode: "user"}});
-      div.appendChild(video);
-
-      imgElement = document.createElement('img');
-      imgElement.style.position = 'absolute';
-      imgElement.style.zIndex = 1;
-      // Remove this line or set to 'none' to prevent mirroring the overlay
-      imgElement.style.transform = 'none';
-      imgElement.onclick = () => { shutdown = true; };
-      div.appendChild(imgElement);
-
-      const instruction = document.createElement('div');
-      instruction.style.background = '#222';
-      instruction.style.color = '#fff';
-      instruction.style.padding = '8px';
-      instruction.style.borderRadius = '0 0 4px 4px';
-      instruction.style.fontSize = '14px';
-      instruction.style.textAlign = 'center';
-      instruction.innerHTML =
-          '<span style="color: #FF5722; font-weight: bold;">' +
-          'Click anywhere on the video to stop</span>';
-      div.appendChild(instruction);
-      instruction.onclick = () => { shutdown = true; };
-
-      video.srcObject = stream;
-      await video.play();
-
-      captureCanvas = document.createElement('canvas');
-      captureCanvas.width = 640;
-      captureCanvas.height = 480;
-      window.requestAnimationFrame(onAnimationFrame);
-
-      return stream;
-    }
-    async function stream_frame(label, imgData) {
-      if (shutdown) {
-        removeDom();
-        shutdown = false;
-        return '';
-      }
-
-      var preCreate = Date.now();
-      stream = await createDom();
-
-      var preShow = Date.now();
-      if (label != "") {
-        labelElement.innerHTML = label;
-      }
-
-      if (imgData != "") {
-        var videoRect = video.getClientRects()[0];
-        imgElement.style.top = videoRect.top + "px";
-        imgElement.style.left = videoRect.left + "px";
-        imgElement.style.width = videoRect.width + "px";
-        imgElement.style.height = videoRect.height + "px";
-        imgElement.src = imgData;
-      }
-
-      var preCapture = Date.now();
-      var result = await new Promise(function(resolve, reject) {
-        pendingResolve = resolve;
-      });
-      shutdown = false;
-
-      return {'create': preShow - preCreate,
-              'show': preCapture - preShow,
-              'capture': Date.now() - preCapture,
-              'img': result};
-    }
-    ''')
-    display(js)
-
-# Helper function to call the JavaScript stream_frame function using JSON encoding
-def video_frame(label, bbox):
-    # Using json.dumps to safely pass the strings to JavaScript
-    return eval_js("stream_frame(%s, %s)" % (json.dumps(label), json.dumps(bbox)))
-
-# Start the video stream
-video_stream()
-
-# Give the JavaScript a moment to load properly
-time.sleep(2)
-
-label_html = 'Initializing facial recognition system...'
-bbox = ''
-prev_time = time.time()
-face_count = 0
-frame_count = 0  # For animation timing
-
-current_friend_index = 0
-friend_keys = list(friend_profiles.keys())
-friend_switch_interval = 100  # Switch displayed friend every 100 frames
-
-while True:
-    # Get video frame from JavaScript
-    js_reply = video_frame(label_html, bbox)
-    if not js_reply:
-        break
-
-    # Increment frame counter
-    frame_count += 1
-
-    # Auto-switch friend profile periodically
-    if frame_count % friend_switch_interval == 0 and len(friend_keys) > 1:
-        current_friend_index = (current_friend_index + 1) % len(friend_keys)
-
-    current_friend_key = friend_keys[current_friend_index]
-
-    # Convert the JS response to an OpenCV image
-    img = js_to_image(js_reply["img"])
-
-    # Flip horizontally to match mirrored display in browser
-    img = cv2.flip(img, 1)
-
+def process_frame(img, face_detector_net, emotion_net, frame_count, current_friend_key):
     # Create an overlay for face bounding boxes and emotion labels
-    bbox_array = np.zeros([480, 640, 4], dtype=np.uint8)
-
+    bbox_array = np.zeros([img.shape[0], img.shape[1], 4], dtype=np.uint8)
+    
     # Face detection using DNN (or Haar Cascade if toggled)
     if USE_DNN_DETECTOR:
         h, w = img.shape[:2]
         blob = cv2.dnn.blobFromImage(cv2.resize(img, (300, 300)), 1.0,
-                                        (300, 300), (104.0, 177.0, 123.0))
+                                     (300, 300), (104.0, 177.0, 123.0))
         face_detector_net.setInput(blob)
         detections = face_detector_net.forward()
         faces = []
@@ -420,6 +264,7 @@ while True:
                 faces.append((x, y, x2 - x, y2 - y))
     else:
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         faces = face_cascade.detectMultiScale(gray)
 
     # Process each detected face
@@ -427,7 +272,7 @@ while True:
     for i, (x, y, w_face, h_face) in enumerate(faces):
         # Detect emotion
         detected_emotion = "neutral"
-        if ENABLE_EMOTION_DETECTION:
+        if ENABLE_EMOTION_DETECTION and emotion_net is not None:
             try:
                 face_roi = img[y:y+h_face, x:x+w_face]
                 gray_face = cv2.cvtColor(face_roi, cv2.COLOR_RGB2GRAY)
@@ -470,21 +315,22 @@ while True:
 
                     # Draw rounded badge background
                     cv2.rectangle(bbox_array,
-                                 (badge_x, badge_y),
-                                 (badge_x + badge_width, badge_y + badge_height),
-                                 (emotion_color[0], emotion_color[1], emotion_color[2], alpha_pulse), -1)
+                               (badge_x, badge_y),
+                               (badge_x + badge_width, badge_y + badge_height),
+                               (emotion_color[0], emotion_color[1], emotion_color[2], alpha_pulse), -1)
 
                     # Draw emotion text
                     cv2.putText(bbox_array, detected_emotion,
-                                (badge_x + 10, badge_y + badge_height - 7),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                                (255, 255, 255, 255), 2)
+                              (badge_x + 10, badge_y + badge_height - 7),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                              (255, 255, 255, 255), 2)
                 else:
                     # Simple emotion text if animations disabled
                     cv2.putText(bbox_array, detected_emotion,
-                                (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                                (0, 255, 0, 255), 2)
+                              (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                              (0, 255, 0, 255), 2)
             except Exception as e:
+                st.error(f"Emotion detection error: {str(e)}")
                 pass
 
         # Draw animated face box
@@ -495,21 +341,16 @@ while True:
             friend_info = friend_profiles[current_friend_key]
             draw_id_card(bbox_array, x, y, w_face, h_face, friend_info, frame_count)
 
-    # Calculate frames per second (FPS)
-    curr_time = time.time()
-    fps = 1 / (curr_time - prev_time)
-    prev_time = curr_time
-
     # Display status info with stylish overlay
     if ENABLE_ANIMATIONS:
         # Draw semi-transparent header bar
-        cv2.rectangle(bbox_array, (0, 0), (640, 40), (0, 0, 0, 180), -1)
+        cv2.rectangle(bbox_array, (0, 0), (img.shape[1], 40), (0, 0, 0, 180), -1)
 
         # Add glowing effect based on face detection
         if face_count > 0:
             glow_intensity = math.sin(frame_count * 0.1 * PULSE_SPEED) * 0.5 + 0.5
             glow_color = (0, int(100 * glow_intensity), int(200 * glow_intensity), 100)
-            cv2.rectangle(bbox_array, (0, 0), (640, 40), glow_color, -1)
+            cv2.rectangle(bbox_array, (0, 0), (img.shape[1], 40), glow_color, -1)
             status = "ACTIVE MONITORING"
         else:
             status = "SEARCHING FOR FACES"
@@ -517,32 +358,230 @@ while True:
         # Draw status text with drop shadow
         shadow_offset = 2
         cv2.putText(bbox_array, status, (12, 30 + shadow_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0, 180), 2)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0, 180), 2)
         cv2.putText(bbox_array, status, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255, 255), 2)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255, 255), 2)
 
         # Display face count and FPS in right corner with shadow
-        info_text = f"FACES: {face_count} | FPS: {fps:.1f}"
+        info_text = f"FACES: {face_count}"
         text_size = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-        text_x = 640 - text_size[0] - 10
+        text_x = img.shape[1] - text_size[0] - 10
 
         cv2.putText(bbox_array, info_text, (text_x + shadow_offset, 30 + shadow_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0, 180), 2)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0, 180), 2)
         cv2.putText(bbox_array, info_text, (text_x, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 255, 255), 2)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 255, 255), 2)
     else:
         # Simple status display if animations disabled
         cv2.putText(bbox_array, f'Faces: {face_count}', (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0, 255), 2)
-        cv2.putText(bbox_array, f'FPS: {fps:.1f}', (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0, 255), 2)
+                  cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0, 255), 2)
 
-    # Update label with status
-    if face_count > 0:
-        label_html = f'<span style="color:#4CAF50">Detected {face_count} face(s)</span>'
-    else:
-        label_html = '<span style="color:#FFA000">Searching for faces...</span>'
-
-    # Update the alpha channel based on drawn content and convert overlay to data URL
+    # Update the alpha channel based on drawn content
     bbox_array[:, :, 3] = (bbox_array.max(axis=2) > 0).astype(int) * 255
-    bbox = bbox_to_bytes(bbox_array)
+    
+    # Combine original image with overlay
+    # Convert original image to RGBA
+    img_rgba = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    
+    # Alpha blending
+    alpha_overlay = bbox_array[:, :, 3] / 255.0
+    alpha_img = 1.0 - alpha_overlay
+    
+    for c in range(0, 3):
+        img_rgba[:, :, c] = (alpha_overlay * bbox_array[:, :, c] + 
+                            alpha_img * img_rgba[:, :, c])
+    
+    return img_rgba, face_count
+
+def main():
+    # Add a custom title with styling
+    st.markdown("""
+    <style>
+    .title {
+        text-align: center;
+        color: #4CAF50;
+        background-color: #333;
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+    .subtitle {
+        text-align: center;
+        font-style: italic;
+        margin-bottom: 30px;
+    }
+    .stApp {
+        background-color: #222;
+        color: #ddd;
+    }
+    </style>
+    <div class="title">
+        <h1>Advanced Face Recognition System</h1>
+    </div>
+    <div class="subtitle">
+        <h4>Featuring emotion detection and friend identification</h4>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar controls
+    st.sidebar.title("Controls")
+    
+    # Display options
+    st.sidebar.header("Display Options")
+    enable_emotion = st.sidebar.checkbox("Enable Emotion Detection", value=True)
+    enable_friend_info = st.sidebar.checkbox("Show Friend ID Card", value=True)
+    enable_animations = st.sidebar.checkbox("Enable Animations", value=True)
+    
+    # Friend selection
+    st.sidebar.header("Friend Selection")
+    friend_selection = st.sidebar.radio(
+        "Select Friend to Display",
+        list(friend_profiles.keys()),
+        format_func=lambda x: friend_profiles[x]["name"]
+    )
+    
+    # Advanced settings
+    st.sidebar.header("Advanced Settings")
+    detection_confidence = st.sidebar.slider("Detection Confidence", 0.3, 0.9, 0.5, 0.1)
+    
+    # Update global flags based on user selections
+    global ENABLE_EMOTION_DETECTION, ENABLE_FRIEND_INFO, ENABLE_ANIMATIONS
+    ENABLE_EMOTION_DETECTION = enable_emotion
+    ENABLE_FRIEND_INFO = enable_friend_info
+    ENABLE_ANIMATIONS = enable_animations
+    
+    # Download and initialize models
+    models_dir = download_models()
+    face_detector_net = initialize_face_detector(models_dir)
+    emotion_net = initialize_emotion_detector(models_dir)
+    
+    # Create two columns for the main interface
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # Add a camera feed
+        st.header("Camera Feed")
+        camera_placeholder = st.empty()
+        
+        # Add status indicators
+        status_placeholder = st.empty()
+        
+        # Add a start button
+        start_button = st.button("Start Face Recognition")
+        stop_button = st.button("Stop")
+        
+    with col2:
+        # Display friend information
+        st.header("Selected Friend Profile")
+        friend_info = friend_profiles[friend_selection]
+        
+        # Create a styled card for friend info
+        st.markdown(f"""
+        <div style="background-color:#444; padding:20px; border-radius:10px; border:2px solid #70A9A1;">
+            <h3 style="color:#4CAF50; margin-top:0;">{friend_info['name']}</h3>
+            <div style="background-color:#2E6171; display:inline-block; padding:5px 10px; border-radius:5px; margin-bottom:10px;">
+                {friend_info['category']}
+            </div>
+            <p><strong>ID:</strong> {friend_info['id']}</p>
+            <p><strong>Age:</strong> {friend_info['age']}</p>
+            <p><strong>Since:</strong> {friend_info['since']}</p>
+            <p><strong>Interests:</strong> {friend_info['interests']}</p>
+            <div style="margin-top:10px;">
+                <p><strong>Relationship Score:</strong></p>
+                <div style="background-color:#333; height:20px; border-radius:5px; width:100%;">
+                    <div style="background-color:#4CAF50; height:20px; border-radius:5px; width:{friend_info['relationship_score']}%;">
+                    </div>
+                </div>
+                <p style="text-align:right;">{friend_info['relationship_score']}%</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Stats section
+        st.header("Recognition Stats")
+        stats_placeholder = st.empty()
+    
+    if start_button:
+        if 'frame_count' not in st.session_state:
+            st.session_state.frame_count = 0
+            st.session_state.face_count_history = []
+        
+        # Set up the camera
+        camera = cv2.VideoCapture(0)
+        
+        # Check if camera opened successfully
+        if not camera.isOpened():
+            st.error("Error: Could not open camera. Please check your webcam connection.")
+            return
+        
+        while not stop_button:
+            # Read a frame
+            ret, frame = camera.read()
+            
+            if not ret:
+                st.error("Failed to capture image from camera")
+                break
+            
+            # Flip the frame horizontally for a more natural view
+            frame = cv2.flip(frame, 1)
+            
+            # Increment frame counter for animations
+            st.session_state.frame_count += 1
+            
+            # Process the frame
+            result_frame, face_count = process_frame(
+                frame, 
+                face_detector_net,
+                emotion_net,
+                st.session_state.frame_count,
+                friend_selection
+            )
+            
+            # Keep track of face counts for stats
+            st.session_state.face_count_history.append(face_count)
+            if len(st.session_state.face_count_history) > 30:  # Keep last 30 frames
+                st.session_state.face_count_history.pop(0)
+            
+            # Display the processed frame
+            camera_placeholder.image(
+                result_frame, 
+                channels="RGBA",
+                use_column_width=True
+            )
+            
+            # Update status
+            status_text = "🟢 ACTIVE: Face detection running" if face_count > 0 else "🔍 SEARCHING: No faces detected"
+            status_placeholder.markdown(f"<h3 style='color:{'#4CAF50' if face_count > 0 else '#FFA000'}'>{status_text}</h3>", unsafe_allow_html=True)
+            
+            # Update stats
+            avg_faces = sum(st.session_state.face_count_history) / len(st.session_state.face_count_history) if st.session_state.face_count_history else 0
+            
+            stats_placeholder.markdown(f"""
+            <div style="background-color:#333; padding:15px; border-radius:10px;">
+                <p><strong>Current faces:</strong> {face_count}</p>
+                <p><strong>Average faces:</strong> {avg_faces:.1f}</p>
+                <p><strong>Frame count:</strong> {st.session_state.frame_count}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Use a small sleep to reduce CPU usage
+            time.sleep(0.05)
+        
+        # Release the camera when done
+        camera.release()
+    
+    # Add information section at the bottom
+    st.markdown("---")
+    st.markdown("""
+    ### About This Application
+    This advanced face recognition system features:
+    - Real-time face detection using OpenCV DNN models
+    - Emotion recognition to detect user mood
+    - Friend identification with animated ID cards
+    - Interactive controls and statistics
+    
+    Built with Streamlit and OpenCV for easy deployment.
+    """)
+    
+if __name__ == "__main__":
+    main()
