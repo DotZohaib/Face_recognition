@@ -58,8 +58,12 @@ friend_profiles["friend2"] = {
     "image": "john_profile.jpg"
 }
 
-# Select a default friend to display info for
-default_friend_name = "friend1"
+# Add model download URLs
+files_to_download = {
+    "deploy.prototxt": "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
+    "res10_300x300_ssd_iter_140000.caffemodel": "https://github.com/opencv/opencv_3rdparty/raw/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel",
+    "emotion-ferplus-8.onnx": "https://github.com/onnx/models/raw/main/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
+}
 
 # Download function for models
 @st.cache_resource
@@ -67,7 +71,7 @@ def download_models():
     models_dir = "models"
     os.makedirs(models_dir, exist_ok=True)
     
-    for filename, url in files_to_download.items():
+    for filename, url in files_to_download.items():  # Now works correctly
         filepath = os.path.join(models_dir, filename)
         if not os.path.exists(filepath):
             with st.spinner(f"Downloading {filename}..."):
